@@ -71,6 +71,10 @@ st.set_page_config(
 # --- Resolve API Key ---
 API_KEY = _get_api_key()
 
+# Check session state first (user already entered key)
+if not API_KEY and "temp_api_key" in st.session_state:
+    API_KEY = st.session_state["temp_api_key"]
+
 if not API_KEY:
     st.title("📖 PDF Translator")
     st.markdown("#### Translate books and documents using AI")
@@ -101,10 +105,7 @@ if not API_KEY:
         st.session_state["temp_api_key"] = key_input
         st.rerun()
 
-    if "temp_api_key" in st.session_state:
-        API_KEY = st.session_state["temp_api_key"]
-    else:
-        st.stop()
+    st.stop()
 
 # --- Languages ---
 LANGUAGES = {
