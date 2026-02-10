@@ -9,51 +9,63 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Detect if running on Streamlit Cloud
+IS_CLOUD = os.getenv("STREAMLIT_RUNTIME") == "true" or os.path.exists("/mount/src")
+
 
 def _get_api_key() -> str:
-    """Resolve API key with priority: env var > .env > 1Password > macOS Keychain > UI input."""
+    """Resolve API key with priority: Streamlit secrets > env var > .env > 1Password > macOS Keychain > UI input."""
+
+    # 0. Streamlit secrets (for cloud deployment)
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        if key:
+            return key
+    except Exception:
+        pass
 
     # 1. Environment variable / .env file
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if key:
         return key
 
-    # 2. 1Password CLI
-    try:
-        result = subprocess.run(
-            ["op", "read", "op://Personal/Anthropic API Key/credential"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip().startswith("sk-ant-"):
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    if not IS_CLOUD:
+        # 2. 1Password CLI (local only)
+        try:
+            result = subprocess.run(
+                ["op", "read", "op://Personal/Anthropic API Key/credential"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip().startswith("sk-ant-"):
+                return result.stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
-    # 3. macOS Keychain
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-a", "anthropic",
-             "-s", "pdf-translator", "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        # 3. macOS Keychain (local only)
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-a", "anthropic",
+                 "-s", "pdf-translator", "-w"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
     return ""
 
 
 def save_to_keychain(api_key: str) -> bool:
-    """Save API key to macOS Keychain."""
+    """Save API key to macOS Keychain (local only)."""
+    if IS_CLOUD:
+        return False
     try:
-        # Delete existing entry if any
         subprocess.run(
             ["security", "delete-generic-password", "-a", "anthropic",
              "-s", "pdf-translator"],
             capture_output=True, timeout=5,
         )
-        # Add new entry
         result = subprocess.run(
             ["security", "add-generic-password", "-a", "anthropic",
              "-s", "pdf-translator", "-w", api_key],
@@ -75,56 +87,46 @@ st.set_page_config(
 API_KEY = _get_api_key()
 
 if not API_KEY:
-    st.warning("No se encontró una API key de Anthropic.")
-    st.markdown("**Configurala con cualquiera de estos métodos:**")
+    st.markdown("## Bienvenido a PDF Translator")
+    st.markdown("Para empezar, necesitas una **API key de Anthropic** (la IA que traduce).")
+    st.markdown("Si no tenés una, podés crearla gratis en [console.anthropic.com](https://console.anthropic.com/settings/keys).")
+    st.info("Tu key se usa solo para traducir y no se almacena en nuestros servidores. "
+            "La conexión va directo desde tu navegador a la API de Anthropic.")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🔑 Ingresarla ahora",
-        "📁 Archivo .env",
-        "🔐 1Password",
-        "🍎 Keychain macOS",
-    ])
+    key_input = st.text_input(
+        "Pegá tu API key de Anthropic",
+        type="password",
+        placeholder="sk-ant-api03-...",
+    )
 
-    with tab1:
-        key_input = st.text_input(
-            "Pegá tu API key",
-            type="password",
-            placeholder="sk-ant-api03-...",
-            help="Tu key se usa solo en esta sesión y no se almacena.",
-        )
+    if IS_CLOUD:
+        # Cloud: simple button
+        if st.button("Comenzar", type="primary", use_container_width=True) and key_input:
+            st.session_state["temp_api_key"] = key_input
+            st.rerun()
+    else:
+        # Local: option to save to Keychain
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Usar solo esta vez") and key_input:
+            if st.button("Usar solo esta vez", use_container_width=True) and key_input:
                 st.session_state["temp_api_key"] = key_input
                 st.rerun()
         with col2:
-            if st.button("Guardar en Keychain de macOS") and key_input:
+            if st.button("Guardar en Keychain", use_container_width=True) and key_input:
                 if save_to_keychain(key_input):
-                    st.success("Guardada en Keychain. No vas a necesitar ingresarla de nuevo.")
+                    st.success("Guardada en Keychain.")
                     st.session_state["temp_api_key"] = key_input
                     st.rerun()
                 else:
                     st.error("No se pudo guardar en Keychain.")
 
-    with tab2:
-        st.code('echo "ANTHROPIC_API_KEY=sk-ant-tu-key" > ~/pdf-translator/.env', language="bash")
-        st.caption("Después reiniciá la app.")
-
-    with tab3:
-        st.markdown("""
-        Si tenés **1Password CLI** instalado (`op`), guardá tu key como:
-        - **Vault:** Personal
-        - **Item name:** Anthropic API Key
-        - **Field:** credential
-
-        La app la detecta automáticamente.
-        """)
-        st.code("op item create --category=login --title='Anthropic API Key' 'credential=sk-ant-tu-key'", language="bash")
-
-    with tab4:
-        st.markdown("Guardala en el Keychain de macOS desde la terminal:")
-        st.code('security add-generic-password -a "anthropic" -s "pdf-translator" -w "sk-ant-tu-key"', language="bash")
-        st.caption("La app la detecta automáticamente al reiniciar.")
+        with st.expander("Otros métodos de configuración"):
+            st.markdown("**Archivo .env**")
+            st.code('echo "ANTHROPIC_API_KEY=sk-ant-tu-key" > ~/pdf-translator/.env', language="bash")
+            st.markdown("**1Password CLI**")
+            st.code("op item create --category=login --title='Anthropic API Key' 'credential=sk-ant-tu-key'", language="bash")
+            st.markdown("**macOS Keychain**")
+            st.code('security add-generic-password -a "anthropic" -s "pdf-translator" -w "sk-ant-tu-key"', language="bash")
 
     # Check if user entered a temp key via UI
     if "temp_api_key" in st.session_state:
@@ -271,15 +273,17 @@ with st.sidebar:
     )
 
     st.divider()
-    source = "1Password" if not os.getenv("ANTHROPIC_API_KEY") and API_KEY else \
-             "Keychain" if not os.getenv("ANTHROPIC_API_KEY") else ".env"
     if "temp_api_key" in st.session_state:
-        source = "sesión temporal"
-    st.caption(f"🔒 API key cargada desde: **{source}**")
+        key_source = "ingresada por el usuario"
+    elif os.getenv("ANTHROPIC_API_KEY"):
+        key_source = "variable de entorno"
+    else:
+        key_source = "configuración local"
+    st.caption(f"🔒 API key: **{key_source}**")
 
 # --- Main UI ---
 st.title("📖 PDF Translator")
-st.markdown("Traducí libros y documentos completos usando inteligencia artificial.")
+st.markdown("Translate books and documents using AI. / Traduce libros y documentos con IA.")
 
 uploaded_file = st.file_uploader(
     "Subí tu archivo PDF",
