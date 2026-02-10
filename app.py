@@ -2,6 +2,7 @@
 import io
 import os
 import subprocess
+import sys
 import tempfile
 
 import streamlit as st
@@ -9,14 +10,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Detect if running on Streamlit Cloud
-IS_CLOUD = os.getenv("STREAMLIT_RUNTIME") == "true" or os.path.exists("/mount/src")
+# Detect if running on Streamlit Cloud (vs local macOS/Windows)
+IS_CLOUD = (
+    os.path.exists("/mount/src")
+    or os.getenv("STREAMLIT_SHARING") == "true"
+    or os.getenv("STREAMLIT_RUNTIME") == "true"
+    or sys.platform == "linux"
+)
 
 
 def _get_api_key() -> str:
-    """Resolve API key with priority: Streamlit secrets > env var > .env > 1Password > macOS Keychain > UI input."""
-
-    # 0. Streamlit secrets (for cloud deployment)
+    """Resolve API key from multiple sources."""
+    # Streamlit secrets (cloud deployment)
     try:
         key = st.secrets.get("ANTHROPIC_API_KEY", "")
         if key:
@@ -24,13 +29,13 @@ def _get_api_key() -> str:
     except Exception:
         pass
 
-    # 1. Environment variable / .env file
+    # Environment variable / .env file
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if key:
         return key
 
     if not IS_CLOUD:
-        # 2. 1Password CLI (local only)
+        # 1Password CLI (local only)
         try:
             result = subprocess.run(
                 ["op", "read", "op://Personal/Anthropic API Key/credential"],
@@ -41,7 +46,7 @@ def _get_api_key() -> str:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-        # 3. macOS Keychain (local only)
+        # macOS Keychain (local only)
         try:
             result = subprocess.run(
                 ["security", "find-generic-password", "-a", "anthropic",
@@ -56,26 +61,6 @@ def _get_api_key() -> str:
     return ""
 
 
-def save_to_keychain(api_key: str) -> bool:
-    """Save API key to macOS Keychain (local only)."""
-    if IS_CLOUD:
-        return False
-    try:
-        subprocess.run(
-            ["security", "delete-generic-password", "-a", "anthropic",
-             "-s", "pdf-translator"],
-            capture_output=True, timeout=5,
-        )
-        result = subprocess.run(
-            ["security", "add-generic-password", "-a", "anthropic",
-             "-s", "pdf-translator", "-w", api_key],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
 # --- Page Config ---
 st.set_page_config(
     page_title="PDF Translator",
@@ -87,48 +72,35 @@ st.set_page_config(
 API_KEY = _get_api_key()
 
 if not API_KEY:
-    st.markdown("## Bienvenido a PDF Translator")
-    st.markdown("Para empezar, necesitas una **API key de Anthropic** (la IA que traduce).")
-    st.markdown("Si no tenés una, podés crearla gratis en [console.anthropic.com](https://console.anthropic.com/settings/keys).")
-    st.info("Tu key se usa solo para traducir y no se almacena en nuestros servidores. "
-            "La conexión va directo desde tu navegador a la API de Anthropic.")
+    st.title("📖 PDF Translator")
+    st.markdown("#### Translate books and documents using AI")
+    st.markdown("---")
+
+    st.markdown(
+        "To get started, you need an **Anthropic API key**. "
+        "This key connects the app to Claude, the AI that translates your documents."
+    )
+    st.markdown(
+        "Don't have one? Create it free at "
+        "[console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) "
+        "(you only need to sign up and add credits)."
+    )
+    st.info(
+        "🔒 Your key is used only to translate and is never stored on any server. "
+        "It connects directly from this app to Anthropic's API.",
+        icon="🔒",
+    )
 
     key_input = st.text_input(
-        "Pegá tu API key de Anthropic",
+        "Paste your Anthropic API key",
         type="password",
         placeholder="sk-ant-api03-...",
     )
 
-    if IS_CLOUD:
-        # Cloud: simple button
-        if st.button("Comenzar", type="primary", use_container_width=True) and key_input:
-            st.session_state["temp_api_key"] = key_input
-            st.rerun()
-    else:
-        # Local: option to save to Keychain
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Usar solo esta vez", use_container_width=True) and key_input:
-                st.session_state["temp_api_key"] = key_input
-                st.rerun()
-        with col2:
-            if st.button("Guardar en Keychain", use_container_width=True) and key_input:
-                if save_to_keychain(key_input):
-                    st.success("Guardada en Keychain.")
-                    st.session_state["temp_api_key"] = key_input
-                    st.rerun()
-                else:
-                    st.error("No se pudo guardar en Keychain.")
+    if st.button("Start translating", type="primary", use_container_width=True) and key_input:
+        st.session_state["temp_api_key"] = key_input
+        st.rerun()
 
-        with st.expander("Otros métodos de configuración"):
-            st.markdown("**Archivo .env**")
-            st.code('echo "ANTHROPIC_API_KEY=sk-ant-tu-key" > ~/pdf-translator/.env', language="bash")
-            st.markdown("**1Password CLI**")
-            st.code("op item create --category=login --title='Anthropic API Key' 'credential=sk-ant-tu-key'", language="bash")
-            st.markdown("**macOS Keychain**")
-            st.code('security add-generic-password -a "anthropic" -s "pdf-translator" -w "sk-ant-tu-key"', language="bash")
-
-    # Check if user entered a temp key via UI
     if "temp_api_key" in st.session_state:
         API_KEY = st.session_state["temp_api_key"]
     else:
@@ -155,12 +127,12 @@ LANGUAGES = {
 }
 
 MODELS = {
-    "Claude Sonnet 4.5 (rápido, económico)": "claude-sonnet-4-5-20250929",
-    "Claude Opus 4.6 (máxima calidad)": "claude-opus-4-6",
-    "Claude Haiku 4.5 (ultra rápido)": "claude-haiku-4-5-20251001",
+    "Sonnet 4.5 — fast, affordable": "claude-sonnet-4-5-20250929",
+    "Opus 4.6 — highest quality": "claude-opus-4-6",
+    "Haiku 4.5 — ultra fast, cheapest": "claude-haiku-4-5-20251001",
 }
 
-# Pricing per million tokens (USD) — input / output
+# Pricing per million tokens (USD)
 MODEL_PRICING = {
     "claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00, "label": "Sonnet 4.5"},
     "claude-opus-4-6":            {"input": 15.00, "output": 75.00, "label": "Opus 4.6"},
@@ -169,13 +141,7 @@ MODEL_PRICING = {
 
 
 def estimate_cost(word_count: int, model_id: str) -> dict:
-    """Estimate translation cost based on word count and model.
-
-    Assumptions:
-    - ~1.3 tokens per word (average for multilingual text)
-    - Output tokens ≈ input tokens (translation produces similar length)
-    - Adds 15% overhead for system prompt and formatting
-    """
+    """Estimate translation cost based on word count and model."""
     pricing = MODEL_PRICING.get(model_id, MODEL_PRICING["claude-sonnet-4-5-20250929"])
     tokens_per_word = 1.3
     overhead = 1.15
@@ -198,158 +164,152 @@ def estimate_cost(word_count: int, model_id: str) -> dict:
 
 
 def check_api_credits(api_key: str) -> dict:
-    """Verify API key works and has credits by making a minimal test call.
-
-    Returns dict with:
-      - valid: bool (key is valid)
-      - has_credits: bool (account has credits)
-      - error: str (error message if any)
-    """
+    """Verify API key works and has credits."""
     import anthropic
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=10,
             messages=[{"role": "user", "content": "Hi"}],
         )
         return {"valid": True, "has_credits": True, "error": ""}
     except anthropic.AuthenticationError:
-        return {"valid": False, "has_credits": False, "error": "API key inválida"}
+        return {"valid": False, "has_credits": False, "error": "Invalid API key"}
     except anthropic.PermissionError:
-        return {"valid": True, "has_credits": False, "error": "Sin créditos disponibles"}
+        return {"valid": True, "has_credits": False, "error": "No credits available"}
     except anthropic.RateLimitError:
-        return {"valid": True, "has_credits": False, "error": "Sin créditos o límite de uso alcanzado"}
+        return {"valid": True, "has_credits": False, "error": "No credits or rate limit reached"}
     except Exception as e:
         err = str(e).lower()
         if "credit" in err or "billing" in err or "payment" in err:
-            return {"valid": True, "has_credits": False, "error": "Sin créditos disponibles"}
-        return {"valid": True, "has_credits": True, "error": f"Error desconocido: {e}"}
+            return {"valid": True, "has_credits": False, "error": "No credits available"}
+        return {"valid": True, "has_credits": True, "error": f"Unknown error: {e}"}
 
 # --- Sidebar ---
 with st.sidebar:
-    st.header("⚙️ Configuración")
+    st.header("Settings")
 
     source_lang = st.selectbox(
-        "Idioma origen",
+        "Source language",
         options=list(LANGUAGES.keys()),
         index=1,  # English
     )
 
     target_lang = st.selectbox(
-        "Idioma destino",
+        "Target language",
         options=list(LANGUAGES.keys()),
         index=0,  # Español
     )
 
     model_choice = st.selectbox(
-        "Modelo Claude",
+        "AI Model",
         options=list(MODELS.keys()),
         index=0,
     )
 
-    concurrency = st.slider(
-        "Agentes paralelos",
-        min_value=1,
-        max_value=15,
-        value=8,
-        help="Más agentes = más rápido, pero más uso de API simultáneo",
-    )
+    with st.expander("Advanced options"):
+        concurrency = st.slider(
+            "Parallel workers",
+            min_value=1,
+            max_value=15,
+            value=8,
+            help="More workers = faster translation, but higher simultaneous API usage",
+        )
 
-    chunk_size = st.slider(
-        "Palabras por lote",
-        min_value=2000,
-        max_value=10000,
-        value=5000,
-        step=1000,
-        help="Tamaño de cada lote de traducción",
-    )
+        chunk_size = st.slider(
+            "Words per batch",
+            min_value=2000,
+            max_value=10000,
+            value=5000,
+            step=1000,
+            help="Size of each translation batch",
+        )
 
-    extract_images = st.checkbox(
-        "Extraer e insertar imágenes",
-        value=True,
-        help="Extrae diagramas/gráficos del PDF original e insértalos en la traducción",
-    )
+        extract_images = st.checkbox(
+            "Include images from PDF",
+            value=True,
+            help="Extract diagrams and graphics from the original PDF and include them in the translation",
+        )
 
     st.divider()
-    if "temp_api_key" in st.session_state:
-        key_source = "ingresada por el usuario"
-    elif os.getenv("ANTHROPIC_API_KEY"):
-        key_source = "variable de entorno"
-    else:
-        key_source = "configuración local"
-    st.caption(f"🔒 API key: **{key_source}**")
+    st.caption("🔒 Your API key is used only for this session")
+    if st.button("Change API key", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
 
 # --- Main UI ---
 st.title("📖 PDF Translator")
-st.markdown("Translate books and documents using AI. / Traduce libros y documentos con IA.")
+st.markdown("Translate complete books and documents using AI.")
 
 uploaded_file = st.file_uploader(
-    "Subí tu archivo PDF",
+    "Upload your PDF",
     type="pdf",
-    help="Soporta PDFs de cualquier tamaño. Los más grandes tardarán más.",
+    help="Supports PDFs of any size. Larger files will take longer.",
 )
 
 if uploaded_file:
-    # Show PDF info
     pdf_bytes = uploaded_file.getvalue()
 
     from core.extractor import get_pdf_info
     info = get_pdf_info(io.BytesIO(pdf_bytes))
 
+    # --- Document Info ---
+    st.markdown("### Your document")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Páginas", info["pages"])
-    col2.metric("Palabras", f"{info['word_count']:,}")
-    col3.metric("Imágenes", info["image_count"])
-    col4.metric("Tamaño", f"{len(pdf_bytes) / 1024:.0f} KB")
+    col1.metric("Pages", info["pages"])
+    col2.metric("Words", f"{info['word_count']:,}")
+    col3.metric("Images", info["image_count"])
+    col4.metric("Size", f"{len(pdf_bytes) / 1024:.0f} KB")
 
     if info.get("title"):
-        st.caption(f"**Título:** {info['title']}")
+        st.caption(f"**Title:** {info['title']}")
     if info.get("author"):
-        st.caption(f"**Autor:** {info['author']}")
+        st.caption(f"**Author:** {info['author']}")
 
     # --- Cost Estimation ---
     st.divider()
     model = MODELS[model_choice]
     cost = estimate_cost(info["word_count"], model)
 
-    st.subheader("💰 Costo estimado")
-    cc1, cc2, cc3 = st.columns(3)
-    cc1.metric("Tokens entrada", f"{cost['input_tokens']:,}")
-    cc2.metric("Tokens salida", f"~{cost['output_tokens']:,}")
-    cc3.metric("Costo estimado", f"${cost['total']:.2f} USD")
+    st.markdown("### Estimated cost")
+    st.markdown(
+        f"Translating **{info['word_count']:,} words** with **{cost['model_label']}** "
+        f"will cost approximately **${cost['total']:.2f} USD**."
+    )
 
-    # Show comparison across models
-    with st.expander("Comparar costo entre modelos"):
+    with st.expander("Compare prices across models"):
         for model_name, model_id in MODELS.items():
             c = estimate_cost(info["word_count"], model_id)
-            marker = " ← seleccionado" if model_id == model else ""
-            st.markdown(f"- **{c['model_label']}**: ${c['total']:.2f} USD{marker}")
+            selected = " *(selected)*" if model_id == model else ""
+            st.markdown(f"- **{c['model_label']}**: ${c['total']:.2f} USD{selected}")
+        st.caption("Prices are estimates based on ~1.3 tokens per word. Actual cost may vary slightly.")
 
     # --- Credit Check ---
     if "credit_status" not in st.session_state:
         st.session_state["credit_status"] = None
 
-    if st.button("🔍 Verificar créditos disponibles"):
-        with st.spinner("Verificando..."):
+    if st.button("Check available credits"):
+        with st.spinner("Checking..."):
             result = check_api_credits(API_KEY)
             st.session_state["credit_status"] = result
 
     if st.session_state["credit_status"]:
         status = st.session_state["credit_status"]
         if status["valid"] and status["has_credits"]:
-            st.success("✅ API key válida y con créditos disponibles")
+            st.success("API key is valid and has credits available")
         elif not status["valid"]:
-            st.error(f"❌ {status['error']}")
+            st.error(f"{status['error']}. Check your key and try again.")
         else:
-            st.error(f"❌ {status['error']}")
-            st.markdown("[Cargar créditos en Anthropic Console](https://console.anthropic.com/settings/billing)")
+            st.error(status["error"])
+            st.markdown("[Add credits at Anthropic Console](https://console.anthropic.com/settings/billing)")
 
     st.divider()
 
-    # Translate button
-    if st.button("🚀 Traducir", type="primary", use_container_width=True):
+    # --- Translate ---
+    if st.button("Translate", type="primary", use_container_width=True):
         from core.extractor import extract_text
         from core.chunker import chunk_text
         from core.translator import translate_sync
@@ -360,29 +320,29 @@ if uploaded_file:
         target = LANGUAGES[target_lang]
         model = MODELS[model_choice]
 
-        with st.status("Traduciendo documento...", expanded=True) as status:
+        with st.status("Translating document...", expanded=True) as status:
 
             # Phase 1: Extract text
-            st.write("📄 Extrayendo texto del PDF...")
+            st.write("Extracting text from PDF...")
             progress = st.progress(0)
             pages = extract_text(io.BytesIO(pdf_bytes))
             progress.progress(100)
-            st.write(f"   ✅ {len(pages)} páginas extraídas")
+            st.write(f"   {len(pages)} pages extracted")
 
             # Phase 2: Chunk
-            st.write("✂️ Dividiendo en lotes...")
+            st.write("Splitting into batches...")
             chunks = chunk_text(pages, target_words=chunk_size)
-            st.write(f"   ✅ {len(chunks)} lotes creados")
+            st.write(f"   {len(chunks)} batches created")
 
             # Phase 3: Extract images
             images = []
             if extract_images:
-                st.write("🖼️ Extrayendo imágenes...")
+                st.write("Extracting images...")
                 images = extract_imgs(io.BytesIO(pdf_bytes))
-                st.write(f"   ✅ {len(images)} imágenes encontradas")
+                st.write(f"   {len(images)} images found")
 
             # Phase 4: Translate
-            st.write(f"🌐 Traduciendo ({len(chunks)} lotes con {concurrency} agentes paralelos)...")
+            st.write(f"Translating ({len(chunks)} batches, {concurrency} parallel workers)...")
             translate_progress = st.progress(0)
 
             def on_translate_progress(completed, total, chunk_idx):
@@ -402,13 +362,13 @@ if uploaded_file:
             # Check for errors
             failed = [r for r in results if not r.success]
             if failed:
-                st.warning(f"⚠️ {len(failed)} lotes fallaron: {failed[0].error}")
+                st.warning(f"{len(failed)} batch(es) failed: {failed[0].error}")
 
             successful = [r for r in results if r.success]
-            st.write(f"   ✅ {len(successful)}/{len(results)} lotes traducidos")
+            st.write(f"   {len(successful)}/{len(results)} batches translated")
 
             # Phase 5: Build PDF
-            st.write("📕 Generando PDF...")
+            st.write("Generating PDF...")
             builder = PDFBuilder(
                 title=info.get("title", "Translated Document"),
                 author=info.get("author", ""),
@@ -417,7 +377,6 @@ if uploaded_file:
 
             for result in results:
                 if result.success:
-                    # Insert images from the corresponding page range
                     chunk = chunks[result.chunk_index]
                     chunk_images = [img for img in images
                                     if chunk.start_page <= img.page_num <= chunk.end_page]
@@ -426,10 +385,10 @@ if uploaded_file:
 
                     builder.render_translated_text(result.translated_text)
 
-            st.write(f"   ✅ PDF generado: {builder.page_count} páginas")
-            status.update(label="✅ Traducción completa!", state="complete")
+            st.write(f"   PDF generated: {builder.page_count} pages")
+            status.update(label="Translation complete!", state="complete")
 
-        # Store result in session state
+        # Store result
         st.session_state["pdf_result"] = builder.get_bytes()
         st.session_state["pdf_pages"] = builder.page_count
         st.session_state["translations"] = results
@@ -441,7 +400,7 @@ if "pdf_result" in st.session_state:
     col1, col2 = st.columns([1, 1])
     with col1:
         st.download_button(
-            label=f"⬇️ Descargar PDF traducido ({st.session_state['pdf_pages']} páginas)",
+            label=f"Download translated PDF ({st.session_state['pdf_pages']} pages)",
             data=st.session_state["pdf_result"],
             file_name="translated.pdf",
             mime="application/pdf",
@@ -450,16 +409,15 @@ if "pdf_result" in st.session_state:
         )
 
     with col2:
-        if st.button("🗑️ Limpiar todo", use_container_width=True):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+        if st.button("Start over", use_container_width=True):
+            for key in ["pdf_result", "pdf_pages", "translations", "credit_status"]:
+                st.session_state.pop(key, None)
             st.rerun()
 
     # Preview
-    st.subheader("Vista previa de la traducción")
+    st.markdown("### Translation preview")
     results = st.session_state.get("translations", [])
     for r in results:
         if r.success:
-            preview = r.translated_text[:300] + "..." if len(r.translated_text) > 300 else r.translated_text
-            with st.expander(f"Lote {r.chunk_index + 1}"):
+            with st.expander(f"Batch {r.chunk_index + 1}"):
                 st.text(r.translated_text[:2000])
